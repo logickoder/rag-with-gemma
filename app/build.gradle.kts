@@ -1,5 +1,6 @@
 plugins {
     alias(libs.plugins.android.application)
+    alias(libs.plugins.compose.compiler)
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ksp)
 }
@@ -22,6 +23,10 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    buildFeatures {
+        compose = true
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -42,13 +47,21 @@ dependencies {
     implementation(libs.core.appcompat)
     implementation(libs.core.material)
 
+    // Compose
+    implementation(platform(libs.compose))
+    implementation(libs.compose.activity)
+    implementation(libs.compose.material)
+    implementation(libs.compose.material.icons)
+    implementation(libs.compose.ui)
+
     implementation(libs.room.runtime)
     implementation(libs.room.ktx)
     ksp(libs.room.compiler)
-    implementation(libs.sqlite.vss.android)
+    implementation(libs.sqlite.bundled)
 
     // Local AI Runtimes
     implementation(libs.ai.edge.litert)
+    implementation(libs.mediapipe.tasks.genai)
     implementation(libs.mediapipe.tasks.text)
 
     // Kotlin
