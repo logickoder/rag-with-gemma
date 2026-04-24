@@ -4,6 +4,8 @@ import android.content.Context
 import android.util.Log
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.genai.llminference.LlmInference
+import com.google.mediapipe.tasks.genai.llminference.LlmInferenceSession
+import com.google.mediapipe.tasks.genai.llminference.PromptTemplates
 import com.google.mediapipe.tasks.text.textembedder.TextEmbedder
 import dev.logickoder.ragwithgemma.data.AppDatabase
 import dev.logickoder.ragwithgemma.data.model.DrugMetadata
@@ -25,18 +27,14 @@ class MedicalRagEngine(private val context: Context) {
 
     private lateinit var gemmaLm: LlmInference
     private lateinit var embedder: TextEmbedder
+    private lateinit var sessionOptions: LlmInferenceSession.LlmInferenceSessionOptions
 
     suspend fun initialize() = withContext(Dispatchers.IO) {
         val gemmaFile = File("/data/local/tmp/gemma-4-E2B-it.litertlm")
         if (!gemmaFile.exists()) throw IllegalStateException("Model missing at ${gemmaFile.path}. adb push to /data/local/tmp/ first.")
 
-        // ContextWrapper hack: Forces XNNPACK cache into external storage to avoid SIGABRT from internal partition limits
         val proxyContext = object : android.content.ContextWrapper(context) {
-            override fun getCacheDir(): File {
-                val extCache = externalCacheDir ?: super.getCacheDir()
-//                File(extCache, "gemma-4-E2B-it.litertlm.xnnpack_cache").delete()
-                return extCache
-            }
+            override fun getCacheDir(): File = externalCacheDir ?: super.getCacheDir()
         }
 
         val embedderFile = copyAssetToInternal("mobile_bert.tflite")
@@ -48,38 +46,29 @@ class MedicalRagEngine(private val context: Context) {
 
         gemmaLm = LlmInference.createFromOptions(proxyContext, llmOptions)
 
+        val templates = PromptTemplates.builder()
+            .setUserPrefix("<start_of_turn>user\n")
+            .setUserSuffix("<end_of_turn>\n")
+            .setModelPrefix("<start_of_turn>model\n")
+            .setModelSuffix("<end_of_turn>\n")
+            .build()
+
+        sessionOptions = LlmInferenceSession.LlmInferenceSessionOptions.builder()
+            .setTemperature(0.4f)
+            .setTopK(40)
+            .setTopP(0.95f)
+            .setPromptTemplates(templates)
+            .build()
+
         embedder = TextEmbedder.createFromOptions(
             context,
             TextEmbedder.TextEmbedderOptions.builder()
                 .setBaseOptions(BaseOptions.builder().setModelAssetPath(embedderFile.path).build())
                 .build()
         )
-        Log.d(TAG, "Engine initialized successfully.")
 
         db.createVecTable()
-
-        runCatching {
-            Log.d(TAG, "DIAG sqlite_version=${dao.sqliteVersion()}")
-            Log.d(TAG, "DIAG vss_drug_embeddings xinfo=${dao.vecTableColumns()}")
-        }.onFailure { Log.e(TAG, "DIAG version/xinfo failed", it) }
-
-        runCatching {
-            Log.d(TAG, "DIAG vec modules=${dao.vecModules()}")
-            Log.d(TAG, "DIAG vss CREATE sql=${dao.vecTableSql()}")
-        }.onFailure { Log.e(TAG, "DIAG modules/sql failed", it) }
-
-        runCatching {
-            if (dao.getDrugCount() > 0) {
-                Log.d(TAG, "DIAG smokeKnn=${dao.smokeKnn()}")
-            } else {
-                Log.d(TAG, "DIAG smokeKnn skipped (empty table)")
-            }
-        }.onFailure { Log.e(TAG, "DIAG smokeKnn failed", it) }
-
-        runCatching {
-            val json = (0 until 512).joinToString(prefix = "[", postfix = "]") { "0.0" }
-            Log.d(TAG, "DIAG smokeKnnVecF32=${dao.smokeKnnVecF32(json)}")
-        }.onFailure { Log.e(TAG, "DIAG smokeKnnVecF32 failed", it) }
+        Log.d(TAG, "Engine initialized.")
     }
 
     suspend fun ingestFdaDataIfEmpty() = withContext(Dispatchers.Default) {
@@ -114,48 +103,81 @@ class MedicalRagEngine(private val context: Context) {
         }
 
         dao.insertHybridData(metadataList, embeddingList)
-        Log.d(TAG, "Ingested ${metadataList.size} drugs into Vector DB.")
+        Log.d(TAG, "Ingested ${metadataList.size} drugs.")
     }
 
     fun askMedicalQuestion(query: String): Flow<String> = callbackFlow {
+        var session: LlmInferenceSession? = null
+        val buffer = StringBuilder()
+        var stopped = false
         withContext(Dispatchers.IO) {
-            Log.d(TAG, "Query received: '$query'")
+            Log.d(TAG, "Query: '$query'")
             val queryVector =
                 embedder.embed(query).embeddingResult().embeddings().first().floatEmbedding()
+            val hits = dao.searchWithDistance(floatArrayToByteArray(queryVector), 3)
 
-            val relevantDrugs = dao.searchSemantically(floatArrayToByteArray(queryVector), 3)
+            Log.d(TAG, "RAG distances=${hits.map { it.distance }}")
 
-            if (relevantDrugs.isEmpty()) {
-                Log.w(TAG, "No relevant context found in Vector DB.")
-                trySend("Insufficient local data.")
+            if (hits.isEmpty()) {
+                trySend("No drug data available.")
                 close()
                 return@withContext
             }
 
             val prompt = buildString {
-                appendLine("System: Answer using ONLY the YAML context below. Do not infer.")
+                appendLine("Answer using only the context below. If the context is insufficient, say so.")
+                appendLine()
                 appendLine("Context:")
-                relevantDrugs.forEach { drug ->
-                    appendLine("- Brand: ${drug.brandName}")
-                    appendLine("  Generic: ${drug.genericName}")
-                    appendLine("  Indications: ${drug.indications.take(300)}...")
+                hits.forEach { d ->
+                    appendLine("- ${d.brandName} (${d.genericName}): ${d.indications.take(400)}")
                 }
-                appendLine("User: $query")
-                appendLine("Assistant:")
+                appendLine()
+                appendLine("Question: $query")
             }
 
-            Log.d(TAG, "Sending hydrated prompt to Gemma...")
-            gemmaLm.generateResponseAsync(prompt) { partialResult, done ->
-                if (partialResult != null) trySend(partialResult)
-                if (done) close()
+            Log.d(TAG, "Sending prompt to Gemma.")
+            session = LlmInferenceSession.createFromOptions(gemmaLm, sessionOptions).also { s ->
+                s.addQueryChunk(prompt)
+                s.generateResponseAsync { partial, done ->
+                    if (stopped) return@generateResponseAsync
+                    if (partial != null) {
+                        buffer.append(partial)
+                        val text = buffer.toString()
+                        val stopIdx = STOP_MARKERS.minOfOrNull {
+                            text.indexOf(it).takeIf { i -> i >= 0 } ?: Int.MAX_VALUE
+                        } ?: Int.MAX_VALUE
+                        if (stopIdx != Int.MAX_VALUE) {
+                            val clean = scrubTokens(text.substring(0, stopIdx))
+                            if (clean.isNotEmpty()) trySend(clean)
+                            stopped = true
+                            close()
+                            return@generateResponseAsync
+                        }
+                        val safeLen = text.length - MAX_MARKER_LEN
+                        if (safeLen > 0) {
+                            val flushable = text.substring(0, safeLen)
+                            val cleaned = scrubTokens(flushable)
+                            if (cleaned.isNotEmpty()) trySend(cleaned)
+                            buffer.delete(0, safeLen)
+                        }
+                    }
+                    if (done && !stopped) {
+                        val clean = scrubTokens(buffer.toString())
+                        if (clean.isNotEmpty()) trySend(clean)
+                        close()
+                    }
+                }
             }
         }
-        awaitClose { Log.d(TAG, "LLM Stream closed.") }
+        awaitClose {
+            runCatching { session?.close() }
+            Log.d(TAG, "Stream closed.")
+        }
     }.flowOn(Dispatchers.Default)
 
     private fun floatArrayToByteArray(floats: FloatArray): ByteArray =
         ByteBuffer.allocate(floats.size * 4)
-            .order(java.nio.ByteOrder.LITTLE_ENDIAN) // MANDATORY FOR C++ JNI
+            .order(java.nio.ByteOrder.LITTLE_ENDIAN)
             .apply { for (f in floats) putFloat(f) }
             .array()
 
@@ -169,6 +191,8 @@ class MedicalRagEngine(private val context: Context) {
         return file
     }
 
+    private fun scrubTokens(s: String): String = SCRUB_RE.replace(s, "")
+
     fun close() {
         if (::gemmaLm.isInitialized) gemmaLm.close()
         if (::embedder.isInitialized) embedder.close()
@@ -176,5 +200,8 @@ class MedicalRagEngine(private val context: Context) {
 
     companion object {
         private const val TAG = "MedicalRagEngine"
+        private val SCRUB_RE = Regex("""<(?:start_of_turn|end_of_turn|eos|channel\|?|turn\|?)>""")
+        private val STOP_MARKERS = listOf("<end_of_turn>", "<eos>")
+        private const val MAX_MARKER_LEN = 16
     }
 }
