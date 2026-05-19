@@ -69,6 +69,8 @@ The scripts also work individually:
 
 | Script | What it does |
 |---|---|
+| `scripts/download_embedder.sh` | Downloads MobileBERT embedder into `app/src/main/assets/mobile_bert.tflite` (bundled into the APK). |
+| `scripts/download_sqlite_vec.sh` | Downloads sqlite-vec native lib (default `v0.1.9`) into `app/src/main/jniLibs/arm64-v8a/libsqlite_vec.so`. |
 | `scripts/download_llm.sh` | Prompts for an HTTPS URL or absolute local path to the Gemma `.litertlm` and stores it at `artifacts/gemma-4-E2B-it.litertlm`. |
 | `scripts/push_llm.sh` | `adb push` the model to `/data/local/tmp/`. |
 | `scripts/sideload_drugs.sh` | `curl` the Medscape zip (override with `DRUGS_ZIP_URL=…`), unzip into `artifacts/medscape_drug_jsons/`, then `adb push` to `/data/local/tmp/`. Skips work already done. |
@@ -78,20 +80,19 @@ In a **release** build, the Medscape zip is downloaded on first launch into
 
 ### Native vector engine
 
-Android uses Bionic libc, not glibc — use the Android aarch64 build of
-sqlite-vec:
-
-1. Download from <https://github.com/asg017/sqlite-vec/releases>.
-2. Rename to `libsqlite_vec.so` and place at
-   `app/src/main/jniLibs/arm64-v8a/libsqlite_vec.so`.
+`scripts/download_sqlite_vec.sh` handles this — fetches the Android aarch64
+tarball from <https://github.com/asg017/sqlite-vec/releases>, extracts
+`vec0.so`, renames to `libsqlite_vec.so`, and places it at
+`app/src/main/jniLibs/arm64-v8a/`. Default version `v0.1.9`.
 
 `v0.1.10-alpha.3` does **not** declare the `k` hidden column on vec0 tables.
-Use a stable release (e.g. `v0.1.9`) if you hit `no such column: k` or
-persistent `unable to use function MATCH` errors.
+Stick with `v0.1.9` (or another stable release) to avoid
+`no such column: k` / persistent `unable to use function MATCH` errors.
 
 ### Embedder asset
 
-Place `mobile_bert.tflite` at `app/src/main/assets/mobile_bert.tflite`.
+`scripts/download_embedder.sh` fetches MediaPipe MobileBERT into
+`app/src/main/assets/mobile_bert.tflite` (bundled into the APK).
 
 ## Running
 
