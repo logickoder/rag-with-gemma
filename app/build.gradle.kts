@@ -25,10 +25,15 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     buildTypes {
+        debug {
+            buildConfigField("boolean", "IS_DEV", "true")
+        }
         release {
+            buildConfigField("boolean", "IS_DEV", "false")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
@@ -58,6 +63,9 @@ dependencies {
     implementation(libs.room.ktx)
     ksp(libs.room.compiler)
     implementation(libs.sqlite.bundled)
+    implementation(libs.datastore.preferences)
+    implementation(libs.navigation.compose)
+    implementation(libs.lifecycle.viewmodel.compose)
 
     // Local AI Runtimes
     implementation(libs.ai.edge.litert)

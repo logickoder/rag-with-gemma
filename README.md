@@ -1,135 +1,201 @@
 # Local Medical RAG with Gemma & sqlite-vec
 
-Fully on-device Retrieval-Augmented Generation (RAG) for Android. Runs a quantized Google Gemma
-model (~2.6 GB) and a semantic vector search engine (sqlite-vec) locally, no cloud.
+Fully on-device, section-aware Medical RAG for Android. Mirrors the iOS app:
+chat UI, population-filtered retrieval (Adult / Pediatric / Geriatric),
+drug-drug interaction module (stubbed), and a user-selectable runtime:
+
+- **AI Mode** — quantized Google Gemma (~2.6 GB) via MediaPipe LLM Inference.
+- **Semantic Mode** — no LLM at all; extractive sentence ranking over MobileBERT
+  embeddings rendered as structured markdown. The default on a fresh install.
+
+Switchable at first launch and anytime from **Settings**.
 
 ## Architecture
 
-- **LLM Engine:** MediaPipe LLM Inference API (`gemma-4-E2B-it.litertlm`), wrapped with Gemma
-  chat-template `PromptTemplates` on a per-query `LlmInferenceSession`.
-- **Text Embedder:** MediaPipe Text Embedder (`mobile_bert.tflite`, 512-dim output).
-- **Database:** Room 2.8 with `BundledSQLiteDriver` (new coroutine connection API, not legacy
-  SupportSQLite).
-- **Vector DB:** sqlite-vec loadable C extension. `vec0` virtual table holds 512-dim `float[]`
-  embeddings; KNN via `MATCH` + `ORDER BY distance LIMIT k`.
+- **UI:** Jetpack Compose + `navigation-compose`. Onboarding → Home → Chat / Settings.
+- **DI:** Hand-rolled `AppContainer` on a custom `Application` (`RagApplication`).
+- **State:** `BootstrapViewModel` owns asset resolution, ingestion progress, and
+  the active `Consultant`. It rebuilds the consultant reactively when
+  `UserPrefs.modeFlow` changes.
+- **Embedder:** MediaPipe Text Embedder, `mobile_bert.tflite`, 512-dim.
+- **Database:** Room 2.8 with `BundledSQLiteDriver` (coroutine connection API).
+  Entities: `drug`, `drug_chunk`. Four `vec0` virtual tables — one per
+  population — to keep filtered KNN cheap:
+  `vss_chunks_adult`, `vss_chunks_pediatric`, `vss_chunks_geriatric`,
+  `vss_chunks_general`.
+- **LLM:** MediaPipe `tasks-genai:0.10.33` with Gemma chat-template
+  `PromptTemplates`. iOS-parity structured prompt + post-stream scrub + missing
+  critical-section appendix + deterministic fallback when LLM output is too short.
+
+## Data
+
+Source switched from openFDA to Medscape:
+<https://img.staging.medscape.com/pi/iphone/medscapeapp/UE/u-drugcontent-json-template-139.zip>
+(~55 MB, 3146 drug JSON files). Section numbers map to population + clinical
+label (see [SectionMap.kt](app/src/main/java/dev/logickoder/ragwithgemma/data/ingestion/SectionMap.kt)):
+
+| SectionNumber | Population | Label |
+|---|---|---|
+| 0 | Adult | Dosing |
+| 1 | Pediatric | Dosing |
+| 13 | Geriatric | Dosing |
+| 3 | General | Drug Interactions |
+| 4 | General | Adverse Effects |
+| 5 | General | Warnings & Contraindications |
+| 6 | General | Pregnancy & Lactation |
+| 10 | General | Pharmacology |
+| 11 | General | Administration |
+
+Ingestion: `MedscapeIngestor` walks each JSON, groups items under their h3/h4
+sub-headers, embeds each chunk with MobileBERT, and stores embeddings into the
+population-specific `vec0` table. Progress streams to the UI.
 
 ## Prerequisites
 
-- **Physical Android device (ARM64).** Emulators crash with `SIGILL` inside XNNPACK — SIMD (
-  NEON/SVE/SME2) not mapped.
-- **≥ 6 GB free internal storage** on the device (2.6 GB model + ~2.5 GB XNNPACK cache).
-- **adb** with USB debugging enabled.
+- **Physical Android device (ARM64).** Emulators crash with `SIGILL` inside
+  XNNPACK — SIMD (NEON/SVE/SME2) not mapped.
+- **≥ 6 GB free internal storage** when using AI Mode (2.6 GB model + XNNPACK cache).
+- `adb` with USB debugging enabled.
+- `bash`, `curl`, `unzip` on the dev machine.
 
-## Setup
-
-### 1. Download assets
-
-Place in `app/src/main/assets/`:
-
-- `mobile_bert.tflite` — text embedder
-- `drugs.json` — FDA payload for initial ingestion
-
-Do **not** put the Gemma model in `assets/`. The APK would balloon to 2.6 GB and the package
-installer crashes with `java.io.IOException: Requested internal only, but not enough space`.
-
-### 2. Vector engine native lib
-
-Android uses Bionic libc, not glibc — use the Android aarch64 build of sqlite-vec:
-
-1. Download the Android aarch64 tarball from https://github.com/asg017/sqlite-vec/releases.
-2. Extract the `.so`.
-3. Rename to exactly `libsqlite_vec.so`.
-4. Place at `app/src/main/jniLibs/arm64-v8a/libsqlite_vec.so`.
-
-**Known-broken:** `v0.1.10-alpha.3` does not declare the `k` hidden column on vec0 tables. Use a
-stable release (e.g. `v0.1.9`) if you hit `no such column: k` or persistent
-`unable to use function MATCH` errors.
-
-### 3. Sideload the Gemma model
-
-Keep the model out of the APK. Push it to a location that survives app uninstall:
+## Setup (debug)
 
 ```bash
-adb push /path/to/gemma-4-E2B-it.litertlm /data/local/tmp/
-adb shell ls -lh /data/local/tmp/gemma-4-E2B-it.litertlm
+chmod +x scripts/*.sh
+./scripts/setup.sh    # interactive menu: download LLM, push LLM, sideload drugs
 ```
 
-The engine reads directly from `/data/local/tmp/gemma-4-E2B-it.litertlm`. App uid has execute
-permission on that dir on most AOSP builds; if your device blocks it, copy the file into `filesDir`:
+The scripts also work individually:
+
+| Script | What it does |
+|---|---|
+| `scripts/download_llm.sh` | Prompts for an HTTPS URL or absolute local path to the Gemma `.litertlm` and stores it at `artifacts/gemma-4-E2B-it.litertlm`. |
+| `scripts/push_llm.sh` | `adb push` the model to `/data/local/tmp/`. |
+| `scripts/sideload_drugs.sh` | `curl` the Medscape zip (override with `DRUGS_ZIP_URL=…`), unzip into `artifacts/medscape_drug_jsons/`, then `adb push` to `/data/local/tmp/`. Skips work already done. |
+
+In a **release** build, the Medscape zip is downloaded on first launch into
+`filesDir/medscape_drug_jsons/` instead (requires `INTERNET` permission).
+
+### Native vector engine
+
+Android uses Bionic libc, not glibc — use the Android aarch64 build of
+sqlite-vec:
+
+1. Download from <https://github.com/asg017/sqlite-vec/releases>.
+2. Rename to `libsqlite_vec.so` and place at
+   `app/src/main/jniLibs/arm64-v8a/libsqlite_vec.so`.
+
+`v0.1.10-alpha.3` does **not** declare the `k` hidden column on vec0 tables.
+Use a stable release (e.g. `v0.1.9`) if you hit `no such column: k` or
+persistent `unable to use function MATCH` errors.
+
+### Embedder asset
+
+Place `mobile_bert.tflite` at `app/src/main/assets/mobile_bert.tflite`.
+
+## Running
 
 ```bash
-adb shell "cat /data/local/tmp/gemma-4-E2B-it.litertlm | run-as dev.logickoder.ragwithgemma sh -c 'cat > files/gemma-4-E2B-it.litertlm'"
+./gradlew installDebug && adb shell am start -n dev.logickoder.ragwithgemma/.MainActivity
 ```
 
-…and change the path
-in [MedicalRagEngine.initialize](app/src/main/java/dev/logickoder/ragwithgemma/domain/MedicalRagEngine.kt)
-back to `File(context.filesDir, ...)`.
+First launch:
+1. **Onboarding** card picker — choose **AI Mode** or **Semantic Mode**.
+2. App resolves embedder, creates vec0 tables, parses Medscape JSONs, embeds
+   each chunk, and inserts into the population-specific `vss_chunks_*` table.
+   Progress is shown on the Home screen.
+3. Active consultant is built. AI Mode loads Gemma; Semantic Mode is instant.
 
-### 4. Run
+Subsequent launches skip ingestion (gated by an `ingestion_complete` flag in
+DataStore).
 
-On first launch the engine:
+Verify schema:
 
-1. Creates the `vec0` virtual table via `AppDatabase.createVecTable()` (
-   `useWriterConnection { conn -> conn.execSQL("CREATE VIRTUAL TABLE ...") }`).
-2. Parses `drugs.json`.
-3. Embeds each drug's indications with MobileBERT.
-4. Inserts into `vss_drug_embeddings` with the original rowid linking back to `drug_metadata`.
+```bash
+adb shell run-as dev.logickoder.ragwithgemma \
+  sqlite3 databases/medical_rag.db ".tables"
+# drug, drug_chunk, vss_chunks_adult, vss_chunks_pediatric,
+# vss_chunks_geriatric, vss_chunks_general
+```
 
-## Querying
+## Chat behaviour
 
-Try drug names present in `drugs.json`: Betadine, Naproxen, ofloxacin, povidone-iodine, benzalkonium
-chloride, sertraline, acetaminophen, tamsulosin, glimepiride, etodolac, etc. Example:
-`"What is Betadine used for?"`.
+- Type a bare drug name → satisfactory full clinical profile
+  (`getSatisfactorySummary`).
+- Type a question containing a drug name → semantic answer
+  (`getSemanticAnswer`) with detected population (Adult/Pediatric/Geriatric),
+  top-K vec0 hits in the per-population table, hybrid keyword-name boost,
+  grouped by section, sent to the active `Consultant`.
+- Follow-up question without a drug name → carries the last mentioned drug from
+  history.
+- AI Mode: streams tokens as they arrive, then replaces the final assistant
+  message with the cleaned + appendix-augmented version.
+- Semantic Mode: one-shot rendered markdown (`### drug` + `#### section` +
+  bullet sentences), no LLM.
 
 ## Critical gotchas
 
 ### Little-endian vector serialization
 
-`ByteBuffer` defaults to big-endian. sqlite-vec reads blobs as little-endian float32. Without
-`order(ByteOrder.LITTLE_ENDIAN)` in `floatArrayToByteArray`, distances are computed on garbage
-memory → random RAG results.
+`ByteBuffer` defaults to big-endian. sqlite-vec reads blobs as little-endian
+`float32`. Without `order(ByteOrder.LITTLE_ENDIAN)`, distances are computed on
+garbage memory → random RAG results.
 
 ### XNNPACK cache location
 
-MediaPipe caches weights in `context.cacheDir` by default. For a 2.6 GB model this blows the
-internal partition quota (`SIGABRT: Inserting data in the cache failed`). The engine overrides
-`getCacheDir()` via a `ContextWrapper` to redirect to `externalCacheDir`.
+MediaPipe caches weights in `context.cacheDir` by default. For a 2.6 GB model
+this blows the internal partition quota (`SIGABRT: Inserting data in the cache
+failed`). `LlmConsultant` overrides `getCacheDir()` via a `ContextWrapper` to
+redirect to `externalCacheDir`.
 
-### Don't let Room manage the vec0 table
+### Don't let Room manage the vec0 tables
 
-If you register the vec0 table as a Room `@Entity`, Room's schema validation (
-`fallbackToDestructiveMigration`) drops the virtual table and recreates it as a plain
-`CREATE TABLE`, at which point `MATCH` falls through to SQLite's core `matchFunc` and throws "unable
-to use function MATCH in the requested context". Keep `vss_drug_embeddings` out of
-`@Database(entities=...)` and create it explicitly via `useWriterConnection`.
+If you register a vec0 table as a Room `@Entity`, Room's schema validation
+(`fallbackToDestructiveMigration`) drops the virtual table and recreates it as
+a plain `CREATE TABLE`, at which point `MATCH` falls through to SQLite's core
+`matchFunc` and throws "unable to use function MATCH in the requested
+context". Keep all `vss_chunks_*` tables out of `@Database(entities=…)` and
+create them explicitly in `AppDatabase.createVecTables()`.
 
 ### Room + vec0 query shape
 
-Room's query verifier rejects `MATCH` and unknown hidden columns. Annotate vec queries with
-`@SkipQueryVerification`. Query shape must be recognizable to vec0's `xBestIndex` — simplest
-pattern:
+Room's query verifier rejects `MATCH` and unknown hidden columns. All
+`vss_chunks_*` queries are annotated `@SkipQueryVerification`. Query shape
+must be recognizable to vec0's `xBestIndex`:
 
 ```sql
-SELECT rowid, distance FROM vss_drug_embeddings
-WHERE indicationEmbedding MATCH :queryEmbedding
+SELECT rowid, distance FROM vss_chunks_<pop>
+WHERE embedding MATCH :query
 ORDER BY distance LIMIT :topK
 ```
 
-(Requires SQLite ≥ 3.41 on the vec0 side; `androidx.sqlite:sqlite-bundled:2.6.2` ships 3.50.1.) Join
-the metadata table in Kotlin on the returned rowids rather than in SQL — joining vec0 and a rowid
-table in one query confuses the planner and resurrects the `MATCH` error.
+Join the metadata table in Kotlin on the returned rowids, not in SQL — joining
+vec0 and a rowid table in one query confuses the planner and resurrects the
+`MATCH` error.
 
 ### Gemma chat-template stop handling
 
-MediaPipe `tasks-genai:0.10.33` does **not** expose `setStopTokens`. Even with `PromptTemplates`
-configured for `<start_of_turn>` / `<end_of_turn>`, the runtime can leak those markers into streamed
-output and keep generating until `maxTokens`. Mitigation: buffer partials in the stream callback,
-scan for `<end_of_turn>` / `<eos>`, and close the callback flow + session manually when hit. See
-`askMedicalQuestion`
-in [MedicalRagEngine.kt](app/src/main/java/dev/logickoder/ragwithgemma/domain/MedicalRagEngine.kt).
+MediaPipe `tasks-genai:0.10.33` does **not** expose `setStopTokens`. Even with
+`PromptTemplates` configured, the runtime can leak markers into streamed
+output and keep generating. `LlmConsultant` buffers partials, scans for
+`<end_of_turn>` / `<eos>`, and closes the callback flow + session manually.
 
 ### MediaPipe/LiteRT log spam
 
-MediaPipe floods logcat and trips Android's per-process logd quota (`LOGS OVER PROC QUOTA(300)`),
-dropping your own `Log.d`. Raise logcat buffer size in **Developer options → Logger buffer sizes** (
-16 M) and reboot, or dump `adb logcat > file` and grep locally.
+MediaPipe floods logcat and trips Android's per-process logd quota (`LOGS
+OVER PROC QUOTA(300)`), dropping your own `Log.d`. Raise logcat buffer size
+in **Developer options → Logger buffer sizes** (16 M) and reboot, or dump
+`adb logcat > file` and grep locally.
+
+## Open items
+
+- **Drug-drug interaction DB** — stubbed (`InteractionRepository.findInteractions`
+  returns a failure with a "pending" message). The iOS app uses a separate
+  GRDB sqlite with severity buckets, mechanism scripts, and per-row embeddings;
+  once that asset is available, plug it into `InteractionRepository` matching
+  the iOS `Interaction` shape already in `data/model/Interaction.kt`.
+- **Release-time zip download** — `AssetBootstrap.resolveDrugJsons` performs
+  it on first launch with raw `URL.openConnection()`. Replace with OkHttp +
+  resumable downloads if the zip URL becomes flaky in the field.
+- **Token-budget enforcement for history** — currently a fixed 6-turn window;
+  refine if prompt + history exceeds Gemma's 1024-token limit.

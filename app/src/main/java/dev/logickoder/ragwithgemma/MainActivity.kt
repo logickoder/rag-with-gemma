@@ -4,101 +4,112 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
+import androidx.compose.material3.Surface
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
-import androidx.lifecycle.ViewModelProvider
-import dev.logickoder.ragwithgemma.domain.UiState
-
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
+import dev.logickoder.ragwithgemma.app.RagApplication
+import dev.logickoder.ragwithgemma.ui.BootstrapViewModel
+import dev.logickoder.ragwithgemma.ui.chat.ChatScreen
+import dev.logickoder.ragwithgemma.ui.home.HomeScreen
+import dev.logickoder.ragwithgemma.ui.onboarding.OnboardingScreen
+import dev.logickoder.ragwithgemma.ui.settings.SettingsScreen
 
 class MainActivity : ComponentActivity() {
-    private val viewModel by lazy {
-        ViewModelProvider(this)[MedicalRagViewModel::class.java]
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            MaterialTheme(
-                colorScheme = when {
-                    isSystemInDarkTheme() -> darkColorScheme()
-                    else -> lightColorScheme()
+            AppTheme {
+                Surface(modifier = Modifier.fillMaxSize()) {
+                    AppRoot()
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AppRoot() {
+    val app = androidx.compose.ui.platform.LocalContext.current.applicationContext as RagApplication
+    val container = app.container
+    val vm: BootstrapViewModel = viewModel(factory = BootstrapViewModel.Factory)
+    val nav = rememberNavController()
+
+    LaunchedEffect(Unit) { vm.start() }
+
+    val onboardingComplete by vm.onboardingCompleteFlow.collectAsState(initial = null)
+
+    val start = when (onboardingComplete) {
+        null -> Routes.LOADING
+        false -> Routes.ONBOARDING
+        true -> Routes.HOME
+    }
+
+    NavHost(navController = nav, startDestination = start) {
+        composable(Routes.LOADING) {
+            androidx.compose.foundation.layout.Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = androidx.compose.ui.Alignment.Center,
+            ) {
+                androidx.compose.material3.Text("Starting…")
+            }
+        }
+        composable(Routes.ONBOARDING) {
+            OnboardingScreen(
+                prefs = container.prefs,
+                onComplete = {
+                    nav.navigate(Routes.HOME) {
+                        popUpTo(Routes.ONBOARDING) { inclusive = true }
+                    }
                 },
-                content = ::Screen
+            )
+        }
+        composable(Routes.HOME) {
+            HomeScreen(
+                bootstrapState = vm.state,
+                interactionRepo = container.interactionRepo,
+                onChat = { nav.navigate(Routes.CHAT) },
+                onSettings = { nav.navigate(Routes.SETTINGS) },
+            )
+        }
+        composable(Routes.CHAT) {
+            ChatScreen(
+                engine = vm.requireChatEngine(),
+                onBack = { nav.popBackStack() },
+            )
+        }
+        composable(Routes.SETTINGS) {
+            SettingsScreen(
+                prefs = container.prefs,
+                bootstrap = container.bootstrap,
+                onBack = { nav.popBackStack() },
             )
         }
     }
+}
 
-    @Composable
-    private fun Screen() {
-        val state by viewModel.uiState.collectAsState()
-        val response by viewModel.response.collectAsState()
-        var text by remember { mutableStateOf("") }
+private object Routes {
+    const val LOADING = "loading"
+    const val ONBOARDING = "onboarding"
+    const val HOME = "home"
+    const val CHAT = "chat"
+    const val SETTINGS = "settings"
+}
 
-        Scaffold(
-            modifier = Modifier.fillMaxSize(),
-            content = { scaffoldPadding ->
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(scaffoldPadding)
-                        .padding(16.dp),
-                    content = {
-                        OutlinedTextField(
-                            value = text,
-                            onValueChange = { text = it },
-                            modifier = Modifier.fillMaxWidth(),
-                            enabled = state == UiState.Idle || state is UiState.Err
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        Button(
-                            onClick = {
-                                viewModel.query(text)
-                            },
-                            enabled = text.isNotBlank() && (state == UiState.Idle || state is UiState.Err),
-                            modifier = Modifier.fillMaxWidth(),
-                            content = {
-                                Text(
-                                    when (state) {
-                                        UiState.Init -> "Mapping..."
-                                        UiState.Ingest -> "Indexing..."
-                                        UiState.Gen -> "Thinking..."
-                                        else -> "Ask"
-                                    }
-                                )
-                            }
-                        )
-                        Spacer(Modifier.height(16.dp))
-                        Text(
-                            response,
-                            Modifier
-                                .fillMaxWidth()
-                                .weight(1f)
-                                .verticalScroll(rememberScrollState())
-                        )
-                    }
-                )
-            }
-        )
-    }
+@Composable
+private fun AppTheme(content: @Composable () -> Unit) {
+    MaterialTheme(
+        colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme(),
+        content = content,
+    )
 }

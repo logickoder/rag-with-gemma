@@ -23,6 +23,9 @@ room-runtime = { module = "androidx.room:room-runtime", version.ref = "room" }
 room-ktx = { module = "androidx.room:room-ktx", version.ref = "room" }
 room-compiler = { module = "androidx.room:room-compiler", version.ref = "room" }
 sqlite-bundled = "androidx.sqlite:sqlite-bundled:2.6.2"
+datastore-preferences = "androidx.datastore:datastore-preferences:1.1.7"
+navigation-compose = "androidx.navigation:navigation-compose:2.9.5"
+lifecycle-viewmodel-compose = "androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0"
 # Local AI Runtimes
 ai-edge-litert = "com.google.ai.edge.litert:litert:2.1.4"
 mediapipe-tasks-genai = "com.google.mediapipe:tasks-genai:0.10.33"
