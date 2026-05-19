@@ -94,6 +94,9 @@ interface DrugDao {
     @Query("SELECT COUNT(*) FROM drug")
     suspend fun getDrugCount(): Int
 
+    @Query("SELECT medscapeId FROM drug")
+    suspend fun getAllMedscapeIds(): List<String>
+
     @Transaction
     suspend fun insertDrugWithChunks(
         drug: Drug,

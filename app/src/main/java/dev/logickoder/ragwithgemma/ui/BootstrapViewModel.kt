@@ -109,8 +109,7 @@ class BootstrapViewModel(
         _state.value = BootstrapState.Ready(result.effectiveMode, result.fellBackToSemantic)
     }
 
-    fun requireChatEngine(): ChatEngine =
-        chatEngine ?: error("ChatEngine not ready — bootstrap state: ${_state.value}")
+    fun chatEngineOrNull(): ChatEngine? = chatEngine
 
     override fun onCleared() {
         repository?.consultant?.close()

@@ -190,10 +190,13 @@ in **Developer options → Logger buffer sizes** (16 M) and reboot, or dump
 ## Open items
 
 - **Drug-drug interaction DB** — stubbed (`InteractionRepository.findInteractions`
-  returns a failure with a "pending" message). The iOS app uses a separate
-  GRDB sqlite with severity buckets, mechanism scripts, and per-row embeddings;
-  once that asset is available, plug it into `InteractionRepository` matching
-  the iOS `Interaction` shape already in `data/model/Interaction.kt`.
+  returns a failure with a "pending" message). On iOS the sqlite was built from
+  separate per-table CSVs joined with Python + Langchain (per Madhu, the
+  generator). The embedding column on iOS turned out to be unused — Android
+  should ingest the CSVs (or a joined sqlite) and **drop** the embedding field
+  from `data/model/Interaction.kt` when wiring. AI insight is generated per row
+  from the joined text (`SubjectName`/`ObjectName`/`Direction`/`Effect`/
+  `Strength`/`Comment`/`MechScript`).
 - **Release-time zip download** — `AssetBootstrap.resolveDrugJsons` performs
   it on first launch with raw `URL.openConnection()`. Replace with OkHttp +
   resumable downloads if the zip URL becomes flaky in the field.

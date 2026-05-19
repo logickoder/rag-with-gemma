@@ -4,21 +4,39 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import dev.logickoder.ragwithgemma.app.RagApplication
+import dev.logickoder.ragwithgemma.ui.BootstrapState
 import dev.logickoder.ragwithgemma.ui.BootstrapViewModel
 import dev.logickoder.ragwithgemma.ui.chat.ChatScreen
 import dev.logickoder.ragwithgemma.ui.home.HomeScreen
@@ -40,7 +58,8 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun AppRoot() {
-    val app = androidx.compose.ui.platform.LocalContext.current.applicationContext as RagApplication
+    val app = androidx.compose.ui.platform.LocalContext.current
+        .applicationContext as RagApplication
     val container = app.container
     val vm: BootstrapViewModel = viewModel(factory = BootstrapViewModel.Factory)
     val nav = rememberNavController()
@@ -57,11 +76,11 @@ private fun AppRoot() {
 
     NavHost(navController = nav, startDestination = start) {
         composable(Routes.LOADING) {
-            androidx.compose.foundation.layout.Box(
+            Box(
                 modifier = Modifier.fillMaxSize(),
-                contentAlignment = androidx.compose.ui.Alignment.Center,
+                contentAlignment = Alignment.Center,
             ) {
-                androidx.compose.material3.Text("Starting…")
+                Text("Starting…")
             }
         }
         composable(Routes.ONBOARDING) {
@@ -83,16 +102,59 @@ private fun AppRoot() {
             )
         }
         composable(Routes.CHAT) {
-            ChatScreen(
-                engine = vm.requireChatEngine(),
-                onBack = { nav.popBackStack() },
-            )
+            val engine = vm.chatEngineOrNull()
+            val state by vm.state.collectAsState()
+            if (engine != null) {
+                ChatScreen(engine = engine, onBack = { nav.popBackStack() })
+            } else {
+                ChatNotReady(state = state, onBack = { nav.popBackStack() })
+            }
         }
         composable(Routes.SETTINGS) {
             SettingsScreen(
                 prefs = container.prefs,
                 bootstrap = container.bootstrap,
                 onBack = { nav.popBackStack() },
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ChatNotReady(state: BootstrapState, onBack: () -> Unit) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("AI Consultant") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+            )
+        },
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(24.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            CircularProgressIndicator()
+            Spacer(Modifier.height(12.dp))
+            Text(
+                text = when (state) {
+                    is BootstrapState.Ingesting ->
+                        "Indexing drugs: ${state.progress.processed} / ${state.progress.total}"
+                    is BootstrapState.ResolvingAssets -> state.message
+                    is BootstrapState.LoadingConsultant -> "Loading consultant…"
+                    is BootstrapState.Error -> "Error: ${state.message}"
+                    else -> "Preparing chat…"
+                },
+                style = MaterialTheme.typography.bodyLarge,
             )
         }
     }

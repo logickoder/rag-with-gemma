@@ -27,12 +27,19 @@ class MedscapeIngestor(
             ?.sortedBy { it.name }
             ?: emptyList()
         val total = files.size
-        Log.d(TAG, "Starting ingestion of $total files from ${dir.path}")
+        val alreadyIngested = dao.getAllMedscapeIds().toHashSet()
+        Log.d(TAG, "Starting ingestion of $total files (resume: ${alreadyIngested.size} already done)")
 
-        var drugsInserted = 0
+        var drugsInserted = alreadyIngested.size
         var chunksInserted = 0
 
         files.forEachIndexed { idx, file ->
+            if (file.nameWithoutExtension in alreadyIngested) {
+                if (idx % PROGRESS_EVERY == 0 || idx == total - 1) {
+                    emit(IngestProgress(idx + 1, total, drugsInserted, chunksInserted))
+                }
+                return@forEachIndexed
+            }
             try {
                 val (drug, chunks) = parseFile(file) ?: return@forEachIndexed
                 if (chunks.isEmpty()) return@forEachIndexed
